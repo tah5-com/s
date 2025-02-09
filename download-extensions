@@ -1,0 +1,38 @@
+#!/bin/bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+SCRIPT_DESCRIPTION="Downloads installed Visual Studio Code extensions in VSIX format."
+# shellcheck disable=SC2034 # Unused variable.
+readonly SCRIPT_DESCRIPTION
+
+API_URL="https://marketplace.visualstudio.com/_apis/public/gallery/publishers"
+
+if [ -n "$1" ]; then
+    OUTPUT_DIR="$1"
+    mkdir -p "$OUTPUT_DIR"
+else
+    DRY_RUN=true
+fi
+
+EXTENSION_LIST=$(code --list-extensions --show-versions | grep '@')
+
+while IFS='@' read -r EXTENSION VERSION; do
+    IFS='.' read -ra ADDR <<<"$EXTENSION"
+    PUBLISHER="${ADDR[0]}"
+    EXTENSION_NAME="${ADDR[1]}"
+    DOWNLOAD_URL="${API_URL}/${PUBLISHER}/vsextensions/${EXTENSION_NAME}/${VERSION}/vspackage"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "Download url: $DOWNLOAD_URL"
+    else
+        if [ -f "$OUTPUT_DIR/$EXTENSION_NAME-$VERSION.vsix" ]; then
+            echo "$EXTENSION_NAME-$VERSION.vsix already exists"
+            continue
+        fi
+        wget -O "$OUTPUT_DIR/$EXTENSION_NAME-$VERSION.vsix" "$DOWNLOAD_URL"
+        echo "Downloaded $EXTENSION_NAME-$VERSION.vsix"
+    fi
+done < <(echo "$EXTENSION_LIST")

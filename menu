@@ -1,0 +1,120 @@
+#!/bin/sh
+
+main_menu="System\nWeb Browser\nCompiler\nDevelopment\nContainer\nOthers\nFont\nDesktop Environment\nExit"
+submenu_system="adduser\ndeluser\nja\nlsd\nsecure_ssh\nzsh\nBack"
+submenu_web_browser="chrome\nBack"
+submenu_compiler="clang\nBack"
+submenu_development="code\ncode_export_extension\ncode_install_extension\nd2\ndns_lookup\ngh\nnvim+nvchad\npython\nzellij\nBack"
+submenu_container="docker\nBack"
+submenu_others="download-extensions\nBack"
+submenu_font="font\nBack"
+submenu_desktop_environment="kde\nBack"
+
+
+selected=0
+stack=""
+
+display_menu() {
+  clear
+  current_menu="$1"
+  echo "$current_menu" | awk -v sel="$selected" '{ if (NR-1 == sel) { printf("> %s\n", $0) } else { printf("  %s\n", $0) } }'
+}
+
+read_input() {
+  stty -echo
+  stty cbreak
+  key=$(dd bs=1 count=1 2>/dev/null)
+  stty -cbreak
+  stty echo
+
+  case "$key" in
+  A)
+    if [ "$selected" -gt 0 ]; then
+      selected=$((selected - 1))
+    fi
+    ;;
+  B)
+    current_menu="$1"
+    total_options=$(echo "$current_menu" | wc -l)
+    if [ "$selected" -lt $((total_options - 1)) ]; then
+      selected=$((selected + 1))
+    fi
+    ;;
+  "")
+    return 1
+    ;;
+  esac
+  return 0
+}
+
+menu_loop() {
+  while true; do
+    display_menu "$1"
+    read_input "$1" || break
+  done
+}
+
+process_submenu() {
+  stack="$stack $selected"
+  selected=0
+  while true; do
+    menu_loop "$1"
+    if [ "$selected" -eq $(($(echo "$1" | wc -l) - 1)) ]; then
+      selected=$(echo "$stack" | awk '{print $NF}')
+      stack=$(echo "$stack" | sed 's/ [^ ]*$//')
+      break
+    else
+      choice=$(echo "$1" | sed "$((selected + 1))q;d")
+      execute_action "$choice"
+    fi
+  done
+}
+
+execute_action() {
+  case "$1" in
+  "adduser") sh -c "$(curl -fsSL https://tah5.com/s/adduser)" ;;
+  "chrome") sh -c "$(curl -fsSL https://tah5.com/s/chrome)" ;;
+  "clang") sh -c "$(curl -fsSL https://tah5.com/s/clang)" ;;
+  "code") sh -c "$(curl -fsSL https://tah5.com/s/code)" ;;
+  "code_export_extension") sh -c "$(curl -fsSL https://tah5.com/s/code_export_extension)" ;;
+  "code_install_extension") sh -c "$(curl -fsSL https://tah5.com/s/code_install_extension)" ;;
+  "d2") sh -c "$(curl -fsSL https://tah5.com/s/d2)" ;;
+  "deluser") sh -c "$(curl -fsSL https://tah5.com/s/deluser)" ;;
+  "dns_lookup") sh -c "$(curl -fsSL https://tah5.com/s/dns_lookup)" ;;
+  "docker") sh -c "$(curl -fsSL https://tah5.com/s/docker)" ;;
+  "download-extensions") sh -c "$(curl -fsSL https://tah5.com/s/download-extensions)" ;;
+  "font") sh -c "$(curl -fsSL https://tah5.com/s/font)" ;;
+  "gh") sh -c "$(curl -fsSL https://tah5.com/s/gh)" ;;
+  "ja") sh -c "$(curl -fsSL https://tah5.com/s/ja)" ;;
+  "kde") sh -c "$(curl -fsSL https://tah5.com/s/kde)" ;;
+  "lsd") sh -c "$(curl -fsSL https://tah5.com/s/lsd)" ;;
+  "nvim+nvchad") sh -c "$(curl -fsSL https://tah5.com/s/nvim+nvchad)" ;;
+  "python") sh -c "$(curl -fsSL https://tah5.com/s/python)" ;;
+  "secure_ssh") sh -c "$(curl -fsSL https://tah5.com/s/secure_ssh)" ;;
+  "zellij") sh -c "$(curl -fsSL https://tah5.com/s/zellij)" ;;
+  "zsh") sh -c "$(curl -fsSL https://tah5.com/s/zsh)" ;;
+  esac
+  echo "You selected $1. Press any key to continue..."
+  read -r input
+}
+
+
+while true; do
+  selected=0
+  menu_loop "$main_menu"
+  choice=$(echo "$main_menu" | sed "$((selected + 1))q;d")
+  case "$choice" in
+  "System") process_submenu "$submenu_system" ;;
+  "Web Browser") process_submenu "$submenu_web_browser" ;;
+  "Compiler") process_submenu "$submenu_compiler" ;;
+  "Development") process_submenu "$submenu_development" ;;
+  "Container") process_submenu "$submenu_container" ;;
+  "Others") process_submenu "$submenu_others" ;;
+  "Font") process_submenu "$submenu_font" ;;
+  "Desktop Environment") process_submenu "$submenu_desktop_environment" ;;
+  "Exit")
+    echo "Exiting..."
+    exit 0
+    ;;
+  esac
+done

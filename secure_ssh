@@ -1,0 +1,518 @@
+#!/bin/sh
+# Copyright 2025 tah5. MIT license.
+# shellcheck disable=SC3043 # In POSIX sh, 'local' is undefined.
+# sh -c "$(curl -fsSL https://tah5.com/s/secure_ssh)" -- [OPTIONS]
+
+set -o errexit
+set -o nounset
+
+SCRIPT_NAME="secure_ssh"
+readonly SCRIPT_NAME
+SCRIPT_DESCRIPTION="Sets up a secure SSH server for remote access."
+readonly SCRIPT_DESCRIPTION
+SCRIPT_VERSION="1.4.0 (2024-12-10)"
+readonly SCRIPT_VERSION
+SCRIPT_CATEGORY="System"
+# shellcheck disable=SC2034 # Unused variable.
+readonly SCRIPT_CATEGORY
+SUPPORTED_ARCHS="x86_64 amd64 arm64 aarch64"
+readonly SUPPORTED_ARCHS
+SUPPORTED_PLATFORMS="linux"
+readonly SUPPORTED_PLATFORMS
+
+REQUIRE_PACKAGES=""
+readonly REQUIRE_PACKAGES
+REQUIRE_COMMANDS="awk sort uniq"
+readonly REQUIRE_COMMANDS
+REQUIRE_NONROOT_PACKAGES="sudo"
+readonly REQUIRE_NONROOT_PACKAGES
+
+# Define 'local' if not available
+ensure_local() {
+    command -v local >/dev/null 2>&1 || alias local=typeset
+}
+ensure_local
+
+# Display usage message
+display_usage() {
+    cat <<HELPMSG
+${SCRIPT_NAME} ${SCRIPT_VERSION}
+
+${SCRIPT_DESCRIPTION}
+
+Usage: ${SCRIPT_NAME} [options]
+
+OPTIONS:
+  -h, --help
+          Print help
+  -v, --version
+          Print version
+  --verbose
+          Print verbose output
+HELPMSG
+}
+
+# Convert input to lowercase
+convert_to_lowercase() {
+    tr '[:upper:]' '[:lower:]'
+}
+
+# Get the kernel name in lowercase
+get_kernel_name() {
+    uname -s | convert_to_lowercase
+}
+
+# Get the machine hardware name in lowercase
+get_hardware_name() {
+    uname -m | convert_to_lowercase
+}
+
+# Check if the output is a terminal
+is_terminal() {
+    [ -t 1 ]
+}
+
+# Set terminal color if output is a terminal
+if is_terminal; then
+    set_terminal_color() {
+        printf '\033[%s;%sm' "$1" "$2"
+    }
+else
+    set_terminal_color() {
+        :
+    }
+fi
+
+# Apply terminal color
+apply_color() {
+    set_terminal_color "$1" "$2"
+}
+
+bold_white="$(apply_color 1 37)"
+readonly bold_white
+bold_red="$(apply_color 1 31)"
+readonly bold_red
+reset_color="$(apply_color 0 0)"
+readonly reset_color
+
+# Print informational message
+print_info() {
+    printf '%s%s%s: %s\n' "${bold_white}" "INFO" "${reset_color}" "${*}"
+}
+
+# Print error message
+print_error() {
+    printf '%s%s%s: %s\n' "${bold_red}" "ERROR" "${reset_color}" "${*}" >&2
+}
+
+# Print error message and exit
+abort() {
+    print_error "${*}"
+    exit 1
+}
+
+# Check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Check if a package exists using different package managers
+package_exists() {
+    if command_exists dpkg-query; then
+        dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "ok installed"
+    elif command_exists rpm; then
+        rpm -q "$1" >/dev/null 2>&1
+    elif command_exists pacman; then
+        pacman -Q "$1" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+# Ensure a command is available
+require_command() {
+    if ! command_exists "$1"; then
+        abort "need '$1' (command not found)"
+    fi
+}
+
+# Check if the script is running as root
+is_root() {
+    [ "$(id -u)" -eq 0 ]
+}
+
+# Run a command and exit if it fails
+run_command() {
+    if ! "$@"; then abort "command failed: '$*'"; fi
+}
+
+# Run a command as root or with sudo
+run_command_as_root() {
+    if is_root; then
+        run_command "$@"
+    else
+        run_command sudo "$@"
+    fi
+}
+
+# Backup SSH configuration file
+backup_ssh_conf() {
+    local _config_file
+    _config_file="$1"
+
+    local _backup_file
+    _backup_file="${_config_file}.bak.$(date +%Y%m%d%H%M%S)"
+
+    if sudo cp --archive "$_config_file" "$_backup_file"; then
+        print_info "Backup successful: $_backup_file"
+    else
+        abort "Backup failed."
+    fi
+}
+
+# Detect duplicate lines
+detect_duplicate_directive() {
+    local _config_file
+    _config_file="$1"
+    local _duplicates
+    _duplicates=$(grep -v '^[[:space:]]*$' "$_config_file" |
+        grep -v '^[[:space:]]*#' |
+        awk '{print $1}' |
+        sort | uniq -d || true)
+
+    if [ -n "$_duplicates" ]; then
+        print_info "Duplicate directives found:"
+        print_info "$_duplicates"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Remove duplicate lines
+remove_duplicate_directive() {
+    local _config_file
+    _config_file="$1"
+    print_info "Removing duplicate directives..."
+    # shellcheck disable=SC2016
+    run_command_as_root awk '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ {
+            print; next
+        }
+        {
+            directive = $1
+            if (!seen[directive]++) {
+                print
+            }
+        }
+    ' "$_config_file" | run_command_as_root tee "${_config_file}.tmp" 1>/dev/null
+    run_command_as_root mv "${_config_file}.tmp" "$_config_file"
+    print_info "Duplicate directives removed. Updated $_config_file."
+}
+
+# Main function
+main() {
+    local _platform
+    _platform=$(get_kernel_name)
+    if ! echo "$SUPPORTED_PLATFORMS" | grep -qw "$_platform"; then
+        print_info "Your platform is: $_platform"
+        abort "This script only supports the following platforms: $SUPPORTED_PLATFORMS"
+    fi
+
+    local _arch
+    _arch=$(get_hardware_name)
+    if ! echo "$SUPPORTED_ARCHS" | grep -qw "$_arch"; then
+        print_info "Your architecture is: $_arch"
+        abort "This script only supports the following architectures: $SUPPORTED_ARCHS"
+    fi
+
+    for arg in "$@"; do
+        case "$arg" in
+        --*)
+            case "$arg" in
+            --help)
+                display_usage
+                exit 0
+                ;;
+            --version)
+                print_info "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+                exit 0
+                ;;
+            --verbose)
+                set -o xtrace
+                ;;
+            *)
+                abort "Unknown option: $arg"
+                ;;
+            esac
+            ;;
+        -*)
+            arg_chars=$(echo "$arg" | sed 's/^-//')
+            while [ -n "$arg_chars" ]; do
+                opt=$(echo "$arg_chars" | cut -c1)
+                arg_chars=$(echo "$arg_chars" | cut -c2-)
+                case "$opt" in
+                h)
+                    display_usage
+                    exit 0
+                    ;;
+                v)
+                    print_info "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+                    exit 0
+                    ;;
+                *)
+                    abort "Unknown option: $arg"
+                    ;;
+                esac
+            done
+            ;;
+        *) ;;
+        esac
+    done
+
+    print_info "checking dependencies..."
+    local _missing_deps=""
+    for _pkg in ${REQUIRE_PACKAGES}; do
+        if ! package_exists "${_pkg}"; then
+            _missing_deps="${_missing_deps} ${_pkg}"
+        fi
+    done
+    for _cmd in ${REQUIRE_COMMANDS}; do
+        if ! command_exists "${_cmd}"; then
+            _missing_deps="${_missing_deps} ${_cmd}"
+        fi
+    done
+    if ! is_root; then
+        for _dep in ${REQUIRE_NONROOT_PACKAGES}; do
+            if ! package_exists "${_dep}"; then
+                _missing_deps="${_missing_deps} ${_dep}"
+            fi
+        done
+    fi
+    if [ -n "${_missing_deps}" ]; then
+        abort "missing dependencies:${_missing_deps}"
+    fi
+    print_info "done"
+
+    if is_root; then
+        abort "You must be logged in as a non-root user!"
+    fi
+
+    if [ ! -f "${HOME}/.ssh/authorized_keys" ]; then
+        if sudo [ ! -f "/root/.ssh/authorized_keys" ]; then
+            abort "authorized_keys does not exist, required to disable Password Authentication."
+        else
+            print_info "Copying authorized_keys from root to current user..."
+            run_command mkdir -p "${HOME}/.ssh"
+            run_command_as_root chown -R "${USER}":"${USER}" "${HOME}/.ssh"
+            run_command chmod 700 "${HOME}/.ssh"
+            run_command_as_root cp /root/.ssh/authorized_keys "${HOME}/.ssh/authorized_keys"
+            run_command_as_root chmod 600 "${HOME}/.ssh/authorized_keys"
+        fi
+    fi
+
+    run_command_as_root apt-get update
+
+    if ! package_exists "openssh-server"; then
+        print_info "Installing openssh-server..."
+        run_command_as_root apt-get install --yes openssh-server
+    else
+        print_info "Updating openssh-server..."
+        run_command_as_root apt-get dist-upgrade --yes openssh-server
+    fi
+
+    run_command_as_root mkdir --parents /run/sshd
+
+    SSHD_CONFIG="/etc/ssh/sshd_config"
+    SSH_CONFIG="/etc/ssh/ssh_config"
+    SSH_PORT="22"
+
+    if [ -f "${SSHD_CONFIG}" ]; then
+        CONFIG_FILE="${SSHD_CONFIG}"
+    elif [ -f "${SSH_CONFIG}" ]; then
+        CONFIG_FILE="${SSH_CONFIG}"
+    else
+        abort "Error: Neither ${SSHD_CONFIG} nor ${SSH_CONFIG} exists."
+    fi
+
+    print_info "Checking SSH configuration file before editing..."
+    if sudo sshd -t -f "${CONFIG_FILE}"; then
+        print_info "sshd_config syntax is OK"
+    else
+        abort "sshd_config syntax is invalid"
+    fi
+
+    backup_ssh_conf "${CONFIG_FILE}"
+
+    local _input_port
+    run_command echo "Please enter SSH Port: [Number(default: ${SSH_PORT})/Nn (Cancell)]"
+    run_command read -r _input_port
+
+    case $_input_port in
+    n | N)
+        print_info "SSH Port configuration cancelled."
+        exit 0
+        ;;
+    *[!0-9]*)
+        abort "Invalid input. The port number must be numeric."
+        ;;
+    [0-9]*)
+        SSH_PORT="$_input_port"
+        ;;
+    *)
+        SSH_PORT="22"
+        ;;
+    esac
+
+    print_info "Configuring SSH..."
+    run_command_as_root sed -i "s/^#\?\s*PermitRootLogin.*/PermitRootLogin no/" $CONFIG_FILE
+    run_command_as_root sed -i "s/^#\?\s*PasswordAuthentication.*/PasswordAuthentication no/" $CONFIG_FILE
+    run_command_as_root sed -i "s/^#\?\s*PubkeyAuthentication.*/PubkeyAuthentication yes/" $CONFIG_FILE
+    run_command_as_root sed -i "s/^#\?\s*Port.*/Port ${SSH_PORT}/" $CONFIG_FILE
+    run_command_as_root sed -i "s/^#\?\s*AuthorizedKeysFile.*/AuthorizedKeysFile .ssh\/authorized_keys/" $CONFIG_FILE
+    run_command_as_root sed -i "s/^#\?\s*MaxAuthTries.*/MaxAuthTries 3/" $CONFIG_FILE
+    run_command_as_root sed -i "s/^#\?\s*ClientAliveInterval.*/ClientAliveInterval 300/" $CONFIG_FILE
+    run_command_as_root sed -i "s/^#\?\s*ClientAliveCountMax.*/ClientAliveCountMax 2/" $CONFIG_FILE
+    if grep -q "^Protocol 1" $CONFIG_FILE || grep -q "^#\s*Protocol 2" $CONFIG_FILE; then
+        run_command_as_root sed -i 's/^#\?\s*Protocol.*/Protocol 2/' $CONFIG_FILE
+    elif ! grep -q "^Protocol 2" $CONFIG_FILE; then
+        run_command echo 'Protocol 2' | run_command_as_root tee -a $CONFIG_FILE
+    fi
+    if ! grep -q "^AllowUsers" $CONFIG_FILE; then
+        run_command echo "AllowUsers ${USER}" | run_command_as_root tee -a $CONFIG_FILE
+    fi
+
+    if [ -d "/etc/ssh/sshd_config.d" ] && [ -f "/etc/ssh/sshd_config.d/*.conf" ]; then
+        run_command_as_root sed -i "s/^#\?\s*PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config.d/*.conf
+        run_command_as_root sed -i "s/^#\?\s*PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config.d/*.conf
+        run_command_as_root sed -i "s/^#\?\s*Port.*/Port ${SSH_PORT}/" /etc/ssh/sshd_config.d/*.conf
+        run_command_as_root sed -i "s/^#\?\s*MaxAuthTries.*/MaxAuthTries 3/" /etc/ssh/sshd_config.d/*.conf
+        run_command_as_root sed -i "s/^#\?\s*ClientAliveInterval.*/ClientAliveInterval 300/" /etc/ssh/sshd_config.d/*.conf
+        run_command_as_root sed -i "s/^#\?\s*ClientAliveCountMax.*/ClientAliveCountMax 2/" /etc/ssh/sshd_config.d/*.conf
+        if grep -q "^Protocol 1" /etc/ssh/sshd_config.d/*.conf || grep -q "^#\s*Protocol 2" /etc/ssh/sshd_config.d/*.conf; then
+            run_command_as_root sed -i 's/^#\?\s*Protocol.*/Protocol 2/' /etc/ssh/sshd_config.d/*.conf
+        elif ! grep -q "^Protocol 2" $CONFIG_FILE; then
+            run_command echo 'Protocol 2' | run_command_as_root tee -a /etc/ssh/sshd_config.d/*.conf
+        fi
+    fi
+
+    if detect_duplicate_directive "${CONFIG_FILE}"; then
+        remove_duplicate_directive "${CONFIG_FILE}"
+    fi
+
+    print_info "Checking SSH configuration file after editing..."
+    if sudo sshd -t -f "${CONFIG_FILE}"; then
+        print_info "sshd_config syntax is OK"
+    else
+        abort "sshd_config syntax is invalid"
+    fi
+
+    print_info "Restarting SSH service..."
+    if systemctl is-active --quiet sshd.service; then
+        run_command_as_root systemctl restart sshd.service
+        print_info "sshd restarted successfully"
+    else
+        if sudo service ssh restart 2>/dev/null; then
+            print_info "ssh service restarted successfully using service command"
+        elif sudo service sshd restart 2>/dev/null; then
+            print_info "sshd service restarted successfully using service command"
+        else
+            print_info "SSH service not found or failed to restart."
+            run_command_as_root /etc/init.d/ssh start
+            run_command_as_root systemctl daemon-reload
+        fi
+    fi
+
+    print_info "Configuring UFW..."
+    run_command_as_root apt-get update
+    run_command_as_root apt-get install --yes ufw
+    run_command_as_root ufw default deny incoming
+    run_command_as_root ufw default allow outgoing
+    run_command_as_root ufw limit "${SSH_PORT}/tcp"
+    run_command_as_root ufw allow http
+    run_command_as_root ufw allow https
+    run_command_as_root ufw enable
+    run_command_as_root ufw logging on
+    run_command_as_root ufw logging full
+
+    print_info "Installing Fail2Ban..."
+    run_command_as_root apt-get install --yes fail2ban
+
+    print_info "Configuring Fail2Ban..."
+    run_command_as_root tee /etc/fail2ban/jail.local >/dev/null <<JAIL_LOCAL
+[sshd]
+ignoreip = 127.0.0.1/8 192.168.0.0/24
+enabled  = true
+bantime  = 5m
+findtime = 3m
+maxretry = 3
+# mode     = aggressive
+action   = %(action_)s
+           fail2ban-action[fail2ban-logpath=/var/log/fail2ban-action.log, port="%(port)s", protocol="%(protocol)s"]
+JAIL_LOCAL
+
+    run_command_as_root tee /etc/fail2ban/action.d/fail2ban-action.conf >/dev/null <<'ACTION_CONF'
+[Definition]
+actionstart = <log_head> printf %%b "actionstart" <log_tail> | <logcmd>
+
+actionstop = <log_head>
+             printf %%b "actionstop"
+             <log_tail> | <logcmd>
+
+_ban_info = printf %%b "Date: $(date)
+                        IP: <ip>
+                        Reason:\n<matches>
+                        port: <port>
+                        protocol: <protocol>
+                        hostname: <ip-host>"
+
+actionban = <log_head>
+            printf %%b "banned <ip> from <fq-hostname>
+            The IP <ip> has just been banned by Fail2Ban after <failures> attempts against <name>.\n"
+            %(_ban_info)s;
+            <log_tail> | <logcmd>
+
+actionunban = <log_head>
+              printf %%b "unbanned <ip> from <fq-hostname>
+              The IP <ip> has just been unbanned by Fail2Ban.\n"
+              %(_ban_info)s;
+              <log_tail> | <logcmd>
+
+[Init]
+fail2ban-logpath = /dev/null
+logcmd = tee -a <fail2ban-logpath>
+
+date_with_format = date '+%%Y-%%m-%%dT%%H:%%M:%%S.%%6N%%:z'
+log_head = ( printf %%b "$(<date_with_format>) [Fail2Ban] <name>: ";
+log_tail = ; break-line;
+            printf %%b "\n" )
+ACTION_CONF
+
+    print_info "Starting and enabling Fail2Ban service..."
+    run_command_as_root systemctl start fail2ban.service
+    run_command_as_root fail2ban-client reload --all
+    run_command_as_root systemctl enable fail2ban.service
+
+    print_info "Checking Fail2Ban service status..."
+    run_command_as_root systemctl is-enabled fail2ban.service
+
+    print_info "SSH Configuration completed successfully."
+
+    print_info "Please reboot your system, then run the following commands:"
+    print_info "sudo reboot"
+    print_info "sudo tail -f /var/log/fail2ban-action.log"
+
+}
+
+finish() {
+    result=$?
+    if [ ${result} -ne 0 ]; then
+        print_error "script '${SCRIPT_NAME}' failed with exit code ${result}"
+    fi
+
+    exit ${result}
+}
+
+trap finish EXIT
+
+main "$@"

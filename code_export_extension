@@ -1,0 +1,304 @@
+#!/bin/sh
+# Copyright 2025 tah5. MIT license.
+# shellcheck disable=SC3043 # In POSIX sh, 'local' is undefined.
+# sh -c "$(curl -fsSL https://tah5.com/s/code_export_extension)" -- [OPTIONS]
+
+set -o errexit
+set -o nounset
+
+SCRIPT_NAME="code_export_extension"
+readonly SCRIPT_NAME
+SCRIPT_DESCRIPTION="Exports a list of all installed Visual Studio Code extensions."
+readonly SCRIPT_DESCRIPTION
+SCRIPT_VERSION="1.1.0 (2024-09-08)"
+readonly SCRIPT_VERSION
+SCRIPT_CATEGORY="Development"
+# shellcheck disable=SC2034 # Unused variable.
+readonly SCRIPT_CATEGORY
+SUPPORTED_ARCHS="x86_64 amd64 arm64 aarch64"
+readonly SUPPORTED_ARCHS
+SUPPORTED_PLATFORMS="linux"
+readonly SUPPORTED_PLATFORMS
+
+REQUIRE_PACKAGES=""
+readonly REQUIRE_PACKAGES
+REQUIRE_COMMANDS="code"
+readonly REQUIRE_COMMANDS
+REQUIRE_NONROOT_PACKAGES=""
+readonly REQUIRE_NONROOT_PACKAGES
+
+# Define 'local' if not available
+ensure_local() {
+    command -v local >/dev/null 2>&1 || alias local=typeset
+}
+ensure_local
+
+# Display usage message
+display_usage() {
+    cat <<HELPMSG
+${SCRIPT_NAME} ${SCRIPT_VERSION}
+
+${SCRIPT_DESCRIPTION}
+
+Usage: ${SCRIPT_NAME} [options]
+
+OPTIONS:
+  -h, --help
+          Print help
+  -v, --version
+          Print version
+  --verbose
+          Print verbose output
+HELPMSG
+}
+
+# Convert input to lowercase
+convert_to_lowercase() {
+    tr '[:upper:]' '[:lower:]'
+}
+
+# Get the kernel name in lowercase
+get_kernel_name() {
+    uname -s | convert_to_lowercase
+}
+
+# Get the machine hardware name in lowercase
+get_hardware_name() {
+    uname -m | convert_to_lowercase
+}
+
+# Check if the output is a terminal
+is_terminal() {
+    [ -t 1 ]
+}
+
+# Set terminal color if output is a terminal
+if is_terminal; then
+    set_terminal_color() {
+        printf '\033[%s;%sm' "$1" "$2"
+    }
+else
+    set_terminal_color() {
+        :
+    }
+fi
+
+# Apply terminal color
+apply_color() {
+    set_terminal_color "$1" "$2"
+}
+
+bold_white="$(apply_color 1 37)"
+readonly bold_white
+bold_red="$(apply_color 1 31)"
+readonly bold_red
+reset_color="$(apply_color 0 0)"
+readonly reset_color
+
+# Print informational message
+print_info() {
+    printf '%s%s%s: %s\n' "${bold_white}" "INFO" "${reset_color}" "${*}"
+}
+
+# Print error message
+print_error() {
+    printf '%s%s%s: %s\n' "${bold_red}" "ERROR" "${reset_color}" "${*}" >&2
+}
+
+# Print error message and exit
+abort() {
+    print_error "${*}"
+    exit 1
+}
+
+# Check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Check if a package exists using different package managers
+package_exists() {
+    if command_exists dpkg-query; then
+        dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "ok installed"
+    elif command_exists rpm; then
+        rpm -q "$1" >/dev/null 2>&1
+    elif command_exists pacman; then
+        pacman -Q "$1" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+# Ensure a command is available
+require_command() {
+    if ! command_exists "$1"; then
+        abort "need '$1' (command not found)"
+    fi
+}
+
+# Check if the script is running as root
+is_root() {
+    [ "$(id -u)" -eq 0 ]
+}
+
+# Run a command and exit if it fails
+run_command() {
+    if ! "$@"; then abort "command failed: '$*'"; fi
+}
+
+# Run a command as root or with sudo
+run_command_as_root() {
+    if is_root; then
+        run_command "$@"
+    else
+        run_command sudo "$@"
+    fi
+}
+
+# Export the list of Visual Studio Code extensions
+code_export_extension() {
+    DEFAULT_EXPORT_PATH="./.vscode/exts.list"
+
+    local path
+    echo "Output to: [Path(default: ${DEFAULT_EXPORT_PATH})/Nn (Cancell)]"
+    read -r path
+
+    case "${path}" in
+    n | N)
+        print_info "skip"
+        exit 0
+        ;;
+    "")
+        print_info "Use default path: ${DEFAULT_EXPORT_PATH}"
+        path="${DEFAULT_EXPORT_PATH}"
+        ;;
+    esac
+
+    if [ -z "${path}" ]; then
+        abort "Invalid path"
+    else
+        print_info "Outputting to ${path}..."
+        local current temp
+        current="$(mktemp)"
+        temp="$(mktemp)"
+        # リモートウィンドウのターミナルで実行した際に表示される以下の行を除外するため、`grep '@'`を使用
+        #   Extensions installed on XXXXXXXXXXX:
+        #   WSL: XXXXXXXXXXX にインストールされている拡張機能:
+        run_command code --list-extensions --show-versions | grep '@' >"${current}"
+        if [ -f "${path}" ]; then
+            cat "${path}" "${current}" |
+                sed 's/[[:space:]]*$//' |          # 行末の空白を削除
+                awk -F'@' '{print $1 "@" $2}' |    # '@'で拡張機能IDとバージョンを分割
+                sort -t '@' -k1,1 -k2,2r |         # 拡張機能IDで昇順、バージョンで降順にソート
+                awk -F'@' '!seen[$1]++' >"${temp}" # 拡張機能IDが初めて出現したものだけを保持
+        else
+            # ファイルがない場合は、現在のリストをそのまま使用
+            cp "${current}" "${temp}"
+        fi
+        sed 's/[[:space:]]*$//' "${temp}" | sort >"${path}"
+        rm -f "${current}" "${temp}"
+        print_info "done"
+    fi
+}
+
+# Main function
+main() {
+    local _platform
+    _platform=$(get_kernel_name)
+    if ! echo "$SUPPORTED_PLATFORMS" | grep -qw "$_platform"; then
+        print_info "Your platform is: $_platform"
+        abort "This script only supports the following platforms: $SUPPORTED_PLATFORMS"
+    fi
+
+    local _arch
+    _arch=$(get_hardware_name)
+    if ! echo "$SUPPORTED_ARCHS" | grep -qw "$_arch"; then
+        print_info "Your architecture is: $_arch"
+        abort "This script only supports the following architectures: $SUPPORTED_ARCHS"
+    fi
+
+    for arg in "$@"; do
+        case "$arg" in
+        --*)
+            case "$arg" in
+            --help)
+                display_usage
+                exit 0
+                ;;
+            --version)
+                print_info "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+                exit 0
+                ;;
+            --verbose)
+                set -o xtrace
+                ;;
+            *)
+                abort "Unknown option: $arg"
+                ;;
+            esac
+            ;;
+        -*)
+            arg_chars=$(echo "$arg" | sed 's/^-//')
+            while [ -n "$arg_chars" ]; do
+                opt=$(echo "$arg_chars" | cut -c1)
+                arg_chars=$(echo "$arg_chars" | cut -c2-)
+                case "$opt" in
+                h)
+                    display_usage
+                    exit 0
+                    ;;
+                v)
+                    print_info "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+                    exit 0
+                    ;;
+                *)
+                    abort "Unknown option: $arg"
+                    ;;
+                esac
+            done
+            ;;
+        *) ;;
+        esac
+    done
+
+    print_info "checking dependencies..."
+    local _missing_deps=""
+    for _pkg in ${REQUIRE_PACKAGES}; do
+        if ! package_exists "${_pkg}"; then
+            _missing_deps="${_missing_deps} ${_pkg}"
+        fi
+    done
+    for _cmd in ${REQUIRE_COMMANDS}; do
+        if ! command_exists "${_cmd}"; then
+            _missing_deps="${_missing_deps} ${_cmd}"
+        fi
+    done
+    if ! is_root; then
+        for _dep in ${REQUIRE_NONROOT_PACKAGES}; do
+            if ! package_exists "${_dep}"; then
+                _missing_deps="${_missing_deps} ${_dep}"
+            fi
+        done
+    fi
+    if [ -n "${_missing_deps}" ]; then
+        abort "missing dependencies:${_missing_deps}"
+    fi
+    print_info "done"
+
+    print_info "Exporting Visual Studio Code extension list..."
+    code_export_extension
+
+}
+
+finish() {
+    result=$?
+    if [ ${result} -ne 0 ]; then
+        print_error "script '${SCRIPT_NAME}' failed with exit code ${result}"
+    fi
+
+    exit ${result}
+}
+
+trap finish EXIT
+
+main "$@"
